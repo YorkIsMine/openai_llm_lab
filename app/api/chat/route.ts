@@ -1,20 +1,46 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { ChatRequest } from '@/types';
+import { prisma } from '../../../lib/prisma';
 
-// Инициализируем клиент OpenAI
-// Он автоматически подхватит process.env.OPENAI_API_KEY
 const openai = new OpenAI();
 
 export async function POST(req: Request) {
     try {
-        const { messages, model, temperature, top_p, stop, max_tokens }: ChatRequest = await req.json();
+        const { messages, model, sessionId: reqSessionId, temperature, top_p, stop, max_tokens }: ChatRequest = await req.json();
 
         if (!messages || !Array.isArray(messages)) {
             return NextResponse.json(
                 { error: 'Неверный формат сообщений' },
                 { status: 400 }
             );
+        }
+
+        const userMsg = messages.filter((m) => m.role === 'user').pop();
+        let sessionId = reqSessionId || null;
+
+        const systemMsg = messages.find((m) => m.role === 'system');
+
+        if (!sessionId) {
+            const session = await prisma.session.create({
+                data: { title: userMsg?.content?.slice(0, 50) || 'Новый чат' },
+            });
+            sessionId = session.id;
+            if (systemMsg && systemMsg.content) {
+                await prisma.message.create({
+                    data: { sessionId, role: 'system', content: systemMsg.content },
+                });
+            }
+        }
+
+        if (userMsg && sessionId) {
+            await prisma.message.create({
+                data: {
+                    sessionId,
+                    role: userMsg.role,
+                    content: userMsg.content,
+                },
+            });
         }
 
         const body: {
@@ -42,10 +68,22 @@ export async function POST(req: Request) {
         }
 
         const response = await openai.chat.completions.create(body);
+        const assistantMessage = response.choices[0].message;
+
+        if (sessionId && assistantMessage) {
+            await prisma.message.create({
+                data: {
+                    sessionId,
+                    role: assistantMessage.role || 'assistant',
+                    content: assistantMessage.content || '',
+                },
+            });
+        }
 
         return NextResponse.json({
-            message: response.choices[0].message,
+            message: assistantMessage,
             usage: response.usage ?? undefined,
+            sessionId,
         });
 
     } catch (error: unknown) {

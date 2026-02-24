@@ -64,6 +64,8 @@ export default function Chat() {
     const [topP, setTopP] = useState(1);
     const [stopWords, setStopWords] = useState('');
     const [maxTokens, setMaxTokens] = useState<number | ''>(0);
+    const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
+    const [sessionsLoaded, setSessionsLoaded] = useState(false);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -74,6 +76,54 @@ export default function Chat() {
     useEffect(() => {
         scrollToBottom();
     }, [messages, isLoading]);
+
+    useEffect(() => {
+        if (sessionsLoaded) return;
+        let cancelled = false;
+
+        (async () => {
+            try {
+                const sessRes = await fetch('/api/sessions');
+                if (!sessRes.ok || cancelled) return;
+                const sessions: { id: string }[] = await sessRes.json();
+                if (sessions.length > 0) {
+                    const lastId = sessions[0].id;
+                    setCurrentSessionId(lastId);
+                    const msgRes = await fetch(`/api/sessions/${lastId}/messages`);
+                    if (!msgRes.ok || cancelled) return;
+                    const list: { role: string; content: string }[] = await msgRes.json();
+                    if (list.length > 0) {
+                        const systemMsg = list.find((m) => m.role === 'system');
+                        const rest = list.filter((m) => m.role !== 'system') as Message[];
+                        if (systemMsg) setSystemPrompt(systemMsg.content);
+                        setMessages(
+                            systemMsg
+                                ? ([{ role: 'system', content: systemMsg.content }, ...rest] as Message[])
+                                : ([{ role: 'system', content: DEFAULT_SYSTEM_PROMPT }, ...rest] as Message[])
+                        );
+                    }
+                } else {
+                    const createRes = await fetch('/api/sessions', { method: 'POST' });
+                    if (!createRes.ok || cancelled) return;
+                    const { id } = await createRes.json();
+                    setCurrentSessionId(id);
+                }
+            } catch (e) {
+                console.error('Load sessions:', e);
+                const createRes = await fetch('/api/sessions', { method: 'POST' });
+                if (createRes.ok && !cancelled) {
+                    const { id } = await createRes.json();
+                    setCurrentSessionId(id);
+                }
+            } finally {
+                if (!cancelled) setSessionsLoaded(true);
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [sessionsLoaded]);
 
     const handleSubmit = async (e?: React.FormEvent) => {
         e?.preventDefault();
@@ -102,6 +152,7 @@ export default function Chat() {
                 body: JSON.stringify({
                     messages: messagesToSend,
                     model: selectedModel,
+                    sessionId: currentSessionId,
                     temperature,
                     top_p: topP,
                     stop: stopWords
@@ -121,6 +172,7 @@ export default function Chat() {
 
             const data = await response.json();
 
+            if (data.sessionId) setCurrentSessionId(data.sessionId);
             if (data.message) {
                 setMessages((prev) => [...prev, data.message]);
             }
@@ -149,8 +201,17 @@ export default function Chat() {
         }
     };
 
-    const clearChat = () => {
+    const clearChat = async () => {
         const systemContent = systemPrompt.trim() || DEFAULT_SYSTEM_PROMPT;
+        try {
+            const res = await fetch('/api/sessions', { method: 'POST' });
+            if (res.ok) {
+                const { id } = await res.json();
+                setCurrentSessionId(id);
+            }
+        } catch (e) {
+            console.error('Create session:', e);
+        }
         setMessages([{ role: 'system', content: systemContent }]);
         setSessionUsage(defaultUsage);
     };

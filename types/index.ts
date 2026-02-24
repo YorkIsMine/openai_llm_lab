@@ -8,6 +8,7 @@ export interface Message {
 export interface ChatRequest {
   messages: Message[];
   model: string;
+  sessionId?: string | null;
   temperature?: number;
   top_p?: number;
   stop?: string[];
