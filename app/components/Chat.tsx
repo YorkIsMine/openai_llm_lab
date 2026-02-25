@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useMemo } from 'react';
 import { Message, TokenUsage } from '@/types';
 
 const MODELS = [
+    { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo' },
     { id: 'gpt-4', name: 'GPT-4' },
     { id: 'gpt-4-turbo', name: 'GPT-4 Turbo' },
     { id: 'gpt-4-turbo-preview', name: 'GPT-4 Turbo Preview' },
@@ -16,8 +17,29 @@ const MODELS = [
     { id: 'gpt-5.2', name: 'GPT-5.2' },
 ];
 
+// Максимум токенов контекста (вход + ответ) по моделям OpenAI.
+const CONTEXT_LIMITS: Record<string, number> = {
+    'gpt-3.5-turbo': 16_385,
+    'gpt-4': 8_192,
+    'gpt-4-turbo': 128_000,
+    'gpt-4-turbo-preview': 128_000,
+    'gpt-4o': 128_000,
+    'gpt-4o-mini': 128_000,
+    'gpt-4.1': 128_000,
+    'gpt-4.1-mini': 128_000,
+    'gpt-5': 128_000,
+    'gpt-5.1': 128_000,
+    'gpt-5.2': 128_000,
+};
+
+function formatContextLimit(n: number): string {
+    if (n >= 1000) return `${(n / 1000).toFixed(0)}k`;
+    return String(n);
+}
+
 // USD за 1K токенов (input, output). Примерные значения по документации OpenAI.
 const PRICES_PER_1K: Record<string, { input: number; output: number }> = {
+    'gpt-3.5-turbo': { input: 0.0005, output: 0.0015 },
     'gpt-4': { input: 0.03, output: 0.06 },
     'gpt-4-turbo': { input: 0.01, output: 0.03 },
     'gpt-4-turbo-preview': { input: 0.01, output: 0.03 },
@@ -223,6 +245,8 @@ export default function Chat() {
         return inputCost + outputCost;
     }, [selectedModel, sessionUsage]);
 
+    const contextLimit = CONTEXT_LIMITS[selectedModel] ?? 128_000;
+
     return (
         <div className="flex h-full w-full overflow-hidden font-sans text-slate-200 bg-gradient-to-br from-slate-900 via-slate-900 to-blue-950/30">
 
@@ -354,6 +378,18 @@ export default function Chat() {
                 </section>
 
                 <div className="space-y-4 flex-1 min-h-0">
+                    <section className="rounded-xl border border-slate-700/40 bg-slate-800/40 p-4">
+                        <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
+                            Макс. токенов (контекст модели)
+                        </h3>
+                        <p className="text-[11px] text-slate-500 mb-1.5">
+                            Лимит выбранной модели на один запрос (вход + ответ)
+                        </p>
+                        <div className="text-lg font-semibold tabular-nums text-blue-300">
+                            {formatContextLimit(contextLimit)} токенов
+                        </div>
+                    </section>
+
                     <section className="rounded-xl border border-slate-700/40 bg-slate-800/40 p-4">
                         <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
                             Расход токенов
