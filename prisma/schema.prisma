@@ -8,10 +8,22 @@ datasource db {
 }
 
 model Session {
-  id        String   @id @default(cuid())
-  createdAt DateTime @default(now())
-  title     String?  @default("Новый чат")
-  messages  Message[]
+  id       String          @id @default(cuid())
+  createdAt DateTime       @default(now())
+  title    String?         @default("Новый чат")
+  messages Message[]
+  summaries SessionSummary[]
+}
+
+model SessionSummary {
+  id         String   @id @default(cuid())
+  sessionId  String
+  session    Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  chunkIndex Int      // 0 = first 10 messages, 1 = next 10, ...
+  content    String
+  createdAt  DateTime @default(now())
+
+  @@unique([sessionId, chunkIndex])
 }
 
 model Message {

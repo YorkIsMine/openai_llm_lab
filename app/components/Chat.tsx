@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Message, TokenUsage } from '@/types';
 
 const MODELS = [
@@ -55,6 +55,8 @@ const PRICES_PER_1K: Record<string, { input: number; output: number }> = {
 const defaultUsage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
 const DEFAULT_SYSTEM_PROMPT = 'Ты услужливый и умный AI ассистент.';
 
+type SessionSummaryItem = { chunkIndex: number; content: string; createdAt: string };
+
 /** Цвет индикатора температуры: 0 — голубой, 2 — красный */
 function temperatureColor(t: number): string {
     const clamp = Math.max(0, Math.min(1, t / 2));
@@ -81,6 +83,7 @@ export default function Chat() {
     const [isLoading, setIsLoading] = useState(false);
     const [selectedModel, setSelectedModel] = useState(MODELS[0].id);
     const [sessionUsage, setSessionUsage] = useState<TokenUsage>(defaultUsage);
+    const [lastRequestUsage, setLastRequestUsage] = useState<TokenUsage | null>(null);
     const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM_PROMPT);
     const [temperature, setTemperature] = useState(0.7);
     const [topP, setTopP] = useState(1);
@@ -88,8 +91,28 @@ export default function Chat() {
     const [maxTokens, setMaxTokens] = useState<number | ''>(0);
     const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
     const [sessionsLoaded, setSessionsLoaded] = useState(false);
+    const [sessionSummaries, setSessionSummaries] = useState<SessionSummaryItem[]>([]);
+    const [summaryWindowOpen, setSummaryWindowOpen] = useState(false);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
+
+    const loadSummaries = useCallback(async (sessionId: string | null) => {
+        if (!sessionId) {
+            setSessionSummaries([]);
+            return;
+        }
+        try {
+            const res = await fetch(`/api/sessions/${sessionId}/summaries`);
+            if (res.ok) {
+                const data = await res.json();
+                setSessionSummaries(Array.isArray(data) ? data : []);
+            } else {
+                setSessionSummaries([]);
+            }
+        } catch {
+            setSessionSummaries([]);
+        }
+    }, []);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -147,6 +170,10 @@ export default function Chat() {
         };
     }, [sessionsLoaded]);
 
+    useEffect(() => {
+        loadSummaries(currentSessionId);
+    }, [currentSessionId, loadSummaries]);
+
     const handleSubmit = async (e?: React.FormEvent) => {
         e?.preventDefault();
         if (!input.trim() || isLoading) return;
@@ -194,11 +221,18 @@ export default function Chat() {
 
             const data = await response.json();
 
+            const sid = data.sessionId ?? currentSessionId;
             if (data.sessionId) setCurrentSessionId(data.sessionId);
             if (data.message) {
                 setMessages((prev) => [...prev, data.message]);
             }
+            if (sid) loadSummaries(sid);
             if (data.usage) {
+                setLastRequestUsage({
+                    prompt_tokens: data.usage.prompt_tokens ?? 0,
+                    completion_tokens: data.usage.completion_tokens ?? 0,
+                    total_tokens: data.usage.total_tokens ?? 0,
+                });
                 setSessionUsage((prev) => ({
                     prompt_tokens: prev.prompt_tokens + (data.usage.prompt_tokens ?? 0),
                     completion_tokens: prev.completion_tokens + (data.usage.completion_tokens ?? 0),
@@ -236,6 +270,9 @@ export default function Chat() {
         }
         setMessages([{ role: 'system', content: systemContent }]);
         setSessionUsage(defaultUsage);
+        setLastRequestUsage(null);
+        setSessionSummaries([]);
+        setSummaryWindowOpen(false);
     };
 
     const totalCostUSD = useMemo(() => {
@@ -392,7 +429,33 @@ export default function Chat() {
 
                     <section className="rounded-xl border border-slate-700/40 bg-slate-800/40 p-4">
                         <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
-                            Расход токенов
+                            Последний вопрос‑ответ в токенах
+                        </h3>
+                        {lastRequestUsage ? (
+                            <div className="space-y-2.5 text-sm">
+                                <div className="flex justify-between items-center">
+                                    <span className="text-slate-500">Вход (prompt)</span>
+                                    <span className="font-medium tabular-nums text-slate-200">{lastRequestUsage.prompt_tokens.toLocaleString()}</span>
+                                </div>
+                                <div className="h-px bg-slate-700/50" />
+                                <div className="flex justify-between items-center">
+                                    <span className="text-slate-500">Выход (completion)</span>
+                                    <span className="font-medium tabular-nums text-slate-200">{lastRequestUsage.completion_tokens.toLocaleString()}</span>
+                                </div>
+                                <div className="h-px bg-slate-700/50" />
+                                <div className="flex justify-between items-center">
+                                    <span className="text-slate-500">Всего</span>
+                                    <span className="font-semibold tabular-nums text-blue-300">{lastRequestUsage.total_tokens.toLocaleString()}</span>
+                                </div>
+                            </div>
+                        ) : (
+                            <p className="text-sm text-slate-500">—</p>
+                        )}
+                    </section>
+
+                    <section className="rounded-xl border border-slate-700/40 bg-slate-800/40 p-4">
+                        <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
+                            Расход токенов (сессия)
                         </h3>
                         <div className="space-y-2.5 text-sm">
                             <div className="flex justify-between items-center">
@@ -506,6 +569,22 @@ export default function Chat() {
                         <div className="flex items-center gap-2 pr-2.5 py-2.5">
                             <button
                                 type="button"
+                                onClick={() => setSummaryWindowOpen(true)}
+                                className="flex h-10 items-center gap-1.5 rounded-xl px-3 text-sm font-medium text-slate-300 bg-slate-700/60 border border-slate-600/40 hover:bg-slate-600/60 hover:text-slate-200 transition-all shrink-0"
+                                title="Результат суммаризации"
+                            >
+                                <svg className="w-4 h-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                </svg>
+                                Саммари
+                                {sessionSummaries.length > 0 && (
+                                    <span className="ml-0.5 min-w-[18px] h-[18px] rounded-full bg-blue-500/80 text-[10px] font-bold text-white flex items-center justify-center">
+                                        {sessionSummaries.length}
+                                    </span>
+                                )}
+                            </button>
+                            <button
+                                type="button"
                                 onClick={clearChat}
                                 disabled={isLoading || messages.filter(m => m.role !== 'system').length === 0}
                                 className="flex h-10 items-center gap-1.5 rounded-xl px-3 text-sm font-medium text-slate-300 bg-slate-700/60 border border-slate-600/40 hover:bg-slate-600/60 hover:text-slate-200 transition-all disabled:opacity-40 disabled:pointer-events-none shrink-0"
@@ -538,6 +617,58 @@ export default function Chat() {
                     </p>
                 </div>
             </main>
+
+            {/* Окно результата суммаризации */}
+            {summaryWindowOpen && (
+                <div
+                    className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm"
+                    onClick={() => setSummaryWindowOpen(false)}
+                >
+                    <div
+                        className="bg-slate-900 border border-slate-600/50 rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col overflow-hidden"
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <div className="flex items-center justify-between px-5 py-4 border-b border-slate-700/50 shrink-0">
+                            <h2 className="text-lg font-semibold text-slate-100">
+                                Результат суммаризации
+                            </h2>
+                            <button
+                                type="button"
+                                onClick={() => setSummaryWindowOpen(false)}
+                                className="p-2 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-slate-800/80 transition-colors"
+                                aria-label="Закрыть"
+                            >
+                                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                                </svg>
+                            </button>
+                        </div>
+                        <div className="flex-1 overflow-y-auto p-5 custom-scrollbar">
+                            {sessionSummaries.length === 0 ? (
+                                <p className="text-slate-400 text-sm">
+                                    Саммари появятся для длинных диалогов: каждые 10 сообщений создаётся краткое содержание, которое подставляется в контекст модели вместо полной истории.
+                                </p>
+                            ) : (
+                                <div className="space-y-4">
+                                    {sessionSummaries.map((s, i) => (
+                                        <div
+                                            key={s.chunkIndex}
+                                            className="rounded-xl bg-slate-800/60 border border-slate-700/40 p-4"
+                                        >
+                                            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2">
+                                                Блок {i + 1} (сообщения 1–{(i + 1) * 10})
+                                            </div>
+                                            <p className="text-slate-200 text-sm leading-relaxed whitespace-pre-wrap">
+                                                {s.content}
+                                            </p>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

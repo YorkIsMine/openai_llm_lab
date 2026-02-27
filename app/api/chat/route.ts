@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { ChatRequest } from '@/types';
 import { prisma } from '../../../lib/prisma';
+import { buildMessagesWithSummaries } from '../../../lib/chatContext';
 
 const openai = new OpenAI();
 
@@ -20,6 +21,7 @@ export async function POST(req: Request) {
         let sessionId = reqSessionId || null;
 
         const systemMsg = messages.find((m) => m.role === 'system');
+        const systemContent = systemMsg?.content?.trim() || 'Ты полезный AI-ассистент.';
 
         if (!sessionId) {
             const session = await prisma.session.create({
@@ -43,30 +45,28 @@ export async function POST(req: Request) {
             });
         }
 
-        const body: {
-            model: string;
-            messages: typeof messages;
-            temperature?: number;
-            top_p?: number;
-            stop?: string[];
-            max_tokens?: number;
-        } = {
-            model: model || 'gpt-4o',
-            messages,
-        };
-        if (typeof temperature === 'number' && temperature >= 0 && temperature <= 2) {
-            body.temperature = temperature;
-        }
-        if (typeof top_p === 'number' && top_p >= 0 && top_p <= 1) {
-            body.top_p = top_p;
-        }
-        if (Array.isArray(stop) && stop.length > 0) {
-            body.stop = stop.map((s) => String(s).trim()).filter(Boolean).slice(0, 4);
-        }
-        if (typeof max_tokens === 'number' && max_tokens > 0) {
-            body.max_tokens = max_tokens;
-        }
+        const dbMessages = await prisma.message.findMany({
+            where: { sessionId: sessionId! },
+            orderBy: { createdAt: 'asc' },
+            select: { role: true, content: true },
+        });
 
+        const requestMessages = await buildMessagesWithSummaries(
+            prisma,
+            openai,
+            sessionId!,
+            dbMessages,
+            systemContent
+        );
+
+        const body = {
+            model: model || 'gpt-4o',
+            messages: requestMessages as OpenAI.Chat.ChatCompletionMessageParam[],
+            ...(typeof temperature === 'number' && temperature >= 0 && temperature <= 2 && { temperature }),
+            ...(typeof top_p === 'number' && top_p >= 0 && top_p <= 1 && { top_p }),
+            ...(Array.isArray(stop) && stop.length > 0 && { stop: stop.map((s) => String(s).trim()).filter(Boolean).slice(0, 4) }),
+            ...(typeof max_tokens === 'number' && max_tokens > 0 && { max_tokens }),
+        };
         const response = await openai.chat.completions.create(body);
         const assistantMessage = response.choices[0].message;
 
