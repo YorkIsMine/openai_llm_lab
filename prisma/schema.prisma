@@ -8,11 +8,23 @@ datasource db {
 }
 
 model Session {
-  id       String          @id @default(cuid())
-  createdAt DateTime       @default(now())
-  title    String?         @default("Новый чат")
-  messages Message[]
+  id        String           @id @default(cuid())
+  createdAt DateTime        @default(now())
+  title     String?         @default("Новый чат")
+  facts     String?         // JSON key-value для Sticky Facts
+  messages  Message[]
   summaries SessionSummary[]
+  branches  Branch[]
+}
+
+model Branch {
+  id        String   @id @default(cuid())
+  sessionId String
+  session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  name      String   // "Основная", "Ветка 1", ...
+  baseCount Int      // сколько сообщений из main (branchId=null) входят в базу ветки
+  createdAt DateTime @default(now())
+  messages  Message[]
 }
 
 model SessionSummary {
@@ -30,6 +42,8 @@ model Message {
   id        String   @id @default(cuid())
   sessionId String
   session   Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  branchId  String?  // null = основная ветка
+  branch    Branch?  @relation(fields: [branchId], references: [id], onDelete: Cascade)
   role      String   // system | user | assistant
   content   String
   createdAt DateTime @default(now())

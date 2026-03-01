@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { Message, TokenUsage } from '@/types';
+import { Message, TokenUsage, ContextStrategy } from '@/types';
 
 const MODELS = [
     { id: 'gpt-3.5-turbo', name: 'GPT-3.5 Turbo' },
@@ -56,6 +56,13 @@ const defaultUsage: TokenUsage = { prompt_tokens: 0, completion_tokens: 0, total
 const DEFAULT_SYSTEM_PROMPT = 'Ты услужливый и умный AI ассистент.';
 
 type SessionSummaryItem = { chunkIndex: number; content: string; createdAt: string };
+type BranchItem = { id: string; name: string; baseCount: number; createdAt: string };
+
+const CONTEXT_STRATEGIES: { id: ContextStrategy; label: string }[] = [
+    { id: 'sliding_window', label: 'Sliding Window (последние N)' },
+    { id: 'sticky_facts', label: 'Sticky Facts (ключ-значение)' },
+    { id: 'branching', label: 'Branching (ветки диалога)' },
+];
 
 /** Цвет индикатора температуры: 0 — голубой, 2 — красный */
 function temperatureColor(t: number): string {
@@ -93,6 +100,11 @@ export default function Chat() {
     const [sessionsLoaded, setSessionsLoaded] = useState(false);
     const [sessionSummaries, setSessionSummaries] = useState<SessionSummaryItem[]>([]);
     const [summaryWindowOpen, setSummaryWindowOpen] = useState(false);
+    const [contextStrategy, setContextStrategy] = useState<ContextStrategy>('sliding_window');
+    const [windowSize, setWindowSize] = useState(20);
+    const [currentBranchId, setCurrentBranchId] = useState<string | null>(null);
+    const [branches, setBranches] = useState<BranchItem[]>([]);
+    const [checkpointCount, setCheckpointCount] = useState(0);
 
     const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -111,6 +123,38 @@ export default function Chat() {
             }
         } catch {
             setSessionSummaries([]);
+        }
+    }, []);
+
+    const loadMessagesForSession = useCallback(async (sessionId: string, branchId: string | null) => {
+        const url = branchId
+            ? `/api/sessions/${sessionId}/messages?branchId=${encodeURIComponent(branchId)}`
+            : `/api/sessions/${sessionId}/messages`;
+        const res = await fetch(url);
+        if (!res.ok) return;
+        const list: { role: string; content: string }[] = await res.json();
+        const systemMsg = list.find((m) => m.role === 'system');
+        const rest = list.filter((m) => m.role !== 'system') as Message[];
+        setMessages(
+            systemMsg
+                ? ([{ role: 'system', content: systemMsg.content }, ...rest] as Message[])
+                : ([{ role: 'system', content: DEFAULT_SYSTEM_PROMPT }, ...rest] as Message[])
+        );
+    }, []);
+
+    const loadBranches = useCallback(async (sessionId: string | null) => {
+        if (!sessionId) {
+            setBranches([]);
+            return;
+        }
+        try {
+            const res = await fetch(`/api/sessions/${sessionId}/branches`);
+            if (res.ok) {
+                const data = await res.json();
+                setBranches(Array.isArray(data) ? data : []);
+            } else setBranches([]);
+        } catch {
+            setBranches([]);
         }
     }, []);
 
@@ -172,7 +216,8 @@ export default function Chat() {
 
     useEffect(() => {
         loadSummaries(currentSessionId);
-    }, [currentSessionId, loadSummaries]);
+        loadBranches(currentSessionId);
+    }, [currentSessionId, loadSummaries, loadBranches]);
 
     const handleSubmit = async (e?: React.FormEvent) => {
         e?.preventDefault();
@@ -202,6 +247,9 @@ export default function Chat() {
                     messages: messagesToSend,
                     model: selectedModel,
                     sessionId: currentSessionId,
+                    contextStrategy,
+                    windowSize,
+                    branchId: contextStrategy === 'branching' ? currentBranchId : undefined,
                     temperature,
                     top_p: topP,
                     stop: stopWords
@@ -273,6 +321,9 @@ export default function Chat() {
         setLastRequestUsage(null);
         setSessionSummaries([]);
         setSummaryWindowOpen(false);
+        setCurrentBranchId(null);
+        setBranches([]);
+        setCheckpointCount(0);
     };
 
     const totalCostUSD = useMemo(() => {
@@ -336,6 +387,127 @@ export default function Chat() {
                         disabled={isLoading}
                         rows={4}
                     />
+                </section>
+
+                <section className="mb-5 rounded-xl border border-slate-700/40 bg-slate-800/40 p-4">
+                    <h3 className="text-xs font-medium text-slate-400 uppercase tracking-wider mb-3">
+                        Стратегия контекста
+                    </h3>
+                    <select
+                        value={contextStrategy}
+                        onChange={(e) => setContextStrategy(e.target.value as ContextStrategy)}
+                        disabled={isLoading}
+                        className="w-full appearance-none bg-slate-800/80 border border-slate-600/40 text-slate-100 py-2.5 pl-4 pr-9 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/40 mb-3"
+                    >
+                        {CONTEXT_STRATEGIES.map((s) => (
+                            <option key={s.id} value={s.id} className="bg-slate-800 text-slate-200">
+                                {s.label}
+                            </option>
+                        ))}
+                    </select>
+                    {(contextStrategy === 'sliding_window' || contextStrategy === 'sticky_facts' || contextStrategy === 'branching') && (
+                        <div className="flex items-center gap-2 mb-2">
+                            <label className="text-sm text-slate-500 shrink-0">Окно (N сообщений):</label>
+                            <input
+                                type="number"
+                                min={2}
+                                max={200}
+                                value={windowSize}
+                                onChange={(e) => setWindowSize(Math.max(2, Math.min(200, parseInt(e.target.value, 10) || 20)))}
+                                className="w-20 rounded-lg bg-slate-800/80 border border-slate-600/40 text-slate-100 px-2 py-1.5 text-sm"
+                            />
+                        </div>
+                    )}
+                    {contextStrategy === 'sticky_facts' && (
+                        <p className="text-[11px] text-slate-500 mt-1">
+                            Facts обновляются автоматически после каждого ответа (цель, ограничения, решения).
+                        </p>
+                    )}
+                    {contextStrategy === 'branching' && currentSessionId && (
+                        <div className="mt-3 space-y-2">
+                            <div className="flex flex-wrap gap-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setCheckpointCount(messages.filter((m) => m.role !== 'system').length)}
+                                    disabled={isLoading || currentBranchId !== null}
+                                    title={currentBranchId ? 'Переключитесь на Основную, чтобы сохранить checkpoint' : undefined}
+                                    className="text-xs px-3 py-1.5 rounded-lg bg-slate-700/60 border border-slate-600/40 text-slate-200 hover:bg-slate-600/60 disabled:opacity-50"
+                                >
+                                    Сохранить checkpoint
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={async () => {
+                                        const base = checkpointCount > 0 ? checkpointCount : messages.filter((m) => m.role !== 'system').length;
+                                        const res = await fetch(`/api/sessions/${currentSessionId}/branches`, {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ name: `Ветка ${branches.length + 1}`, baseCount: base }),
+                                        });
+                                        if (res.ok) {
+                                            const branch = await res.json();
+                                            await loadBranches(currentSessionId);
+                                            setCurrentBranchId(branch.id);
+                                            loadMessagesForSession(currentSessionId, branch.id);
+                                        }
+                                    }}
+                                    disabled={isLoading}
+                                    className="text-xs px-3 py-1.5 rounded-lg bg-blue-600/80 border border-blue-500/50 text-white hover:bg-blue-500/80"
+                                >
+                                    Создать ветку
+                                </button>
+                            </div>
+                            <p className="text-[11px] text-slate-500">
+                                Checkpoint: {checkpointCount} сообщ.
+                            </p>
+                            <div className="flex flex-wrap gap-1.5">
+                                <button
+                                    type="button"
+                                    onClick={() => {
+                                        setCurrentBranchId(null);
+                                        loadMessagesForSession(currentSessionId!, null);
+                                    }}
+                                    className={`text-xs px-2.5 py-1 rounded-lg border ${!currentBranchId ? 'bg-slate-600 text-white border-slate-500' : 'bg-slate-800/60 border-slate-600/40 text-slate-300'}`}
+                                >
+                                    Основная
+                                </button>
+                                {branches.map((b) => (
+                                    <span key={b.id} className="inline-flex items-center gap-0.5 rounded-lg border border-slate-600/40 bg-slate-800/60 overflow-hidden">
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                setCurrentBranchId(b.id);
+                                                loadMessagesForSession(currentSessionId!, b.id);
+                                            }}
+                                            className={`text-xs px-2.5 py-1 text-left ${currentBranchId === b.id ? 'bg-slate-600 text-white' : 'text-slate-300 hover:bg-slate-700/60'}`}
+                                        >
+                                            {b.name}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={async () => {
+                                                const wasCurrent = currentBranchId === b.id;
+                                                const res = await fetch(`/api/sessions/${currentSessionId}/branches/${b.id}`, { method: 'DELETE' });
+                                                if (res.ok) {
+                                                    await loadBranches(currentSessionId);
+                                                    if (wasCurrent) {
+                                                        setCurrentBranchId(null);
+                                                        loadMessagesForSession(currentSessionId!, null);
+                                                    }
+                                                }
+                                            }}
+                                            className="p-1 text-slate-400 hover:text-red-400 hover:bg-slate-700/80"
+                                            title="Удалить ветку"
+                                        >
+                                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                                            </svg>
+                                        </button>
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+                    )}
                 </section>
 
                 <section className="mb-5 rounded-xl border border-slate-700/40 bg-slate-800/40 p-4 space-y-4">

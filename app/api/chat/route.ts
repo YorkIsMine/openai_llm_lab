@@ -2,13 +2,25 @@ import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { ChatRequest } from '@/types';
 import { prisma } from '../../../lib/prisma';
-import { buildMessagesWithSummaries } from '../../../lib/chatContext';
+import { buildMessagesByStrategy, extractFactsFromMessages } from '../../../lib/chatContext';
+import { getMessagesForSessionOrBranch } from '../../../lib/branchMessages';
 
 const openai = new OpenAI();
 
 export async function POST(req: Request) {
     try {
-        const { messages, model, sessionId: reqSessionId, temperature, top_p, stop, max_tokens }: ChatRequest = await req.json();
+        const {
+            messages,
+            model,
+            sessionId: reqSessionId,
+            contextStrategy = 'sliding_window',
+            windowSize = 20,
+            branchId: reqBranchId = null,
+            temperature,
+            top_p,
+            stop,
+            max_tokens,
+        }: ChatRequest = await req.json();
 
         if (!messages || !Array.isArray(messages)) {
             return NextResponse.json(
@@ -19,6 +31,7 @@ export async function POST(req: Request) {
 
         const userMsg = messages.filter((m) => m.role === 'user').pop();
         let sessionId = reqSessionId || null;
+        const branchId = reqBranchId || null;
 
         const systemMsg = messages.find((m) => m.role === 'system');
         const systemContent = systemMsg?.content?.trim() || 'Ты полезный AI-ассистент.';
@@ -30,7 +43,7 @@ export async function POST(req: Request) {
             sessionId = session.id;
             if (systemMsg && systemMsg.content) {
                 await prisma.message.create({
-                    data: { sessionId, role: 'system', content: systemMsg.content },
+                    data: { sessionId, branchId, role: 'system', content: systemMsg.content },
                 });
             }
         }
@@ -39,24 +52,38 @@ export async function POST(req: Request) {
             await prisma.message.create({
                 data: {
                     sessionId,
+                    branchId,
                     role: userMsg.role,
                     content: userMsg.content,
                 },
             });
         }
 
-        const dbMessages = await prisma.message.findMany({
-            where: { sessionId: sessionId! },
-            orderBy: { createdAt: 'asc' },
-            select: { role: true, content: true },
-        });
+        const dbMessages = await getMessagesForSessionOrBranch(prisma, sessionId!, branchId);
 
-        const requestMessages = await buildMessagesWithSummaries(
+        let facts: Record<string, string> = {};
+        if (contextStrategy === 'sticky_facts') {
+            const session = await prisma.session.findUnique({
+                where: { id: sessionId! },
+                select: { facts: true },
+            });
+            if (session?.facts) {
+                try {
+                    facts = typeof session.facts === 'string' ? JSON.parse(session.facts) : (session.facts as Record<string, string>);
+                } catch {
+                    facts = {};
+                }
+            }
+        }
+
+        const requestMessages = await buildMessagesByStrategy(
             prisma,
             openai,
+            contextStrategy,
             sessionId!,
             dbMessages,
-            systemContent
+            systemContent,
+            { windowSize, facts }
         );
 
         const body = {
@@ -74,9 +101,22 @@ export async function POST(req: Request) {
             await prisma.message.create({
                 data: {
                     sessionId,
+                    branchId,
                     role: assistantMessage.role || 'assistant',
                     content: assistantMessage.content || '',
                 },
+            });
+        }
+
+        if (contextStrategy === 'sticky_facts' && sessionId) {
+            const updated = await extractFactsFromMessages(
+                openai,
+                [...dbMessages, { role: 'user', content: userMsg?.content ?? '' }, { role: 'assistant', content: assistantMessage?.content ?? '' }],
+                facts
+            );
+            await prisma.session.update({
+                where: { id: sessionId },
+                data: { facts: JSON.stringify(updated) },
             });
         }
 

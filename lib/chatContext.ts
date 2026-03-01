@@ -1,11 +1,42 @@
 import type { PrismaClient } from '@prisma/client';
 import type OpenAI from 'openai';
+import type { ContextStrategy } from '@/types';
 
 const CHUNK_SIZE = 10; // обобщаем полными блоками по 10 сообщений; остаток (0–9) храним дословно
+const DEFAULT_WINDOW = 20;
 
 export interface ChatMessage {
   role: string;
   content: string;
+}
+
+/** Стратегия 1: только последние N сообщений (sliding window) */
+export function buildMessagesSlidingWindow(
+  loadedMessages: ChatMessage[],
+  systemContent: string,
+  windowSize: number = DEFAULT_WINDOW
+): ChatMessage[] {
+  const nonSystem = loadedMessages.filter((m) => m.role !== 'system');
+  const lastN = nonSystem.slice(-windowSize);
+  return [{ role: 'system', content: systemContent }, ...lastN];
+}
+
+/** Стратегия 2: facts (ключ-значение) + последние N сообщений */
+export function buildMessagesStickyFacts(
+  loadedMessages: ChatMessage[],
+  systemContent: string,
+  facts: Record<string, string>,
+  windowSize: number = DEFAULT_WINDOW
+): ChatMessage[] {
+  const nonSystem = loadedMessages.filter((m) => m.role !== 'system');
+  const lastN = nonSystem.slice(-windowSize);
+  const factsEntries = Object.entries(facts).filter(([, v]) => v != null && String(v).trim() !== '');
+  const factsBlock =
+    factsEntries.length > 0
+      ? '\n\n--- Важные факты из диалога ---\n' +
+        factsEntries.map(([k, v]) => `- ${k}: ${String(v).trim()}`).join('\n')
+      : '';
+  return [{ role: 'system', content: systemContent + factsBlock }, ...lastN];
 }
 
 /**
@@ -108,4 +139,61 @@ export async function buildMessagesWithSummaries(
     { role: 'system', content: systemContent + summaryBlock },
     ...lastClean,
   ];
+}
+
+/**
+ * Выбор стратегии контекста и сбор итогового списка сообщений для запроса.
+ */
+export async function buildMessagesByStrategy(
+  prisma: PrismaClient,
+  openai: OpenAI,
+  strategy: ContextStrategy,
+  sessionId: string,
+  loadedMessages: ChatMessage[],
+  systemContent: string,
+  opts: { windowSize?: number; facts?: Record<string, string> } = {}
+): Promise<ChatMessage[]> {
+  const windowSize = opts.windowSize ?? DEFAULT_WINDOW;
+  switch (strategy) {
+    case 'sliding_window':
+      return buildMessagesSlidingWindow(loadedMessages, systemContent, windowSize);
+    case 'sticky_facts': {
+      const facts = opts.facts ?? {};
+      return buildMessagesStickyFacts(loadedMessages, systemContent, facts, windowSize);
+    }
+    case 'branching':
+      return buildMessagesSlidingWindow(loadedMessages, systemContent, windowSize);
+    default:
+      return buildMessagesWithSummaries(prisma, openai, sessionId, loadedMessages, systemContent);
+  }
+}
+
+/** Обновление facts из последних сообщений диалога (для Sticky Facts) */
+export async function extractFactsFromMessages(
+  openai: OpenAI,
+  recentMessages: ChatMessage[],
+  currentFacts: Record<string, string>
+): Promise<Record<string, string>> {
+  const text = recentMessages
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .map((m) => `${m.role === 'user' ? 'Пользователь' : 'Ассистент'}: ${m.content}`)
+    .join('\n\n');
+  const prompt = `Извлеки из диалога важные факты: цель, ограничения, предпочтения, решения, договорённости.
+Текущие факты (обнови или дополни): ${JSON.stringify(currentFacts, null, 0)}
+Верни ТОЛЬКО валидный JSON объект ключ-значение (ключи на латинице), без пояснений.`;
+  try {
+    const res = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: 'Ты возвращаешь только JSON объект.' },
+        { role: 'user', content: `Диалог:\n${text.slice(-3000)}\n\n${prompt}` },
+      ],
+      max_tokens: 500,
+    });
+    const raw = res.choices[0]?.message?.content?.trim() || '{}';
+    const parsed = JSON.parse(raw.replace(/^```\w*\n?|\n?```$/g, '').trim()) as Record<string, string>;
+    return { ...currentFacts, ...parsed };
+  } catch {
+    return currentFacts;
+  }
 }

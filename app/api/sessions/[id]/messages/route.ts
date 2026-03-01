@@ -1,16 +1,15 @@
 import { NextResponse } from 'next/server';
 import { prisma } from '../../../../../lib/prisma';
+import { getMessagesForSessionOrBranch } from '../../../../../lib/branchMessages';
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: { id: string } }
 ) {
   try {
-    const messages = await prisma.message.findMany({
-      where: { sessionId: params.id },
-      orderBy: { createdAt: 'asc' },
-      select: { role: true, content: true },
-    });
+    const { searchParams } = new URL(req.url);
+    const branchId = searchParams.get('branchId') || null;
+    const messages = await getMessagesForSessionOrBranch(prisma, params.id, branchId);
     return NextResponse.json(messages);
   } catch (e) {
     console.error('GET /api/sessions/[id]/messages:', e);

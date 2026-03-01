@@ -5,10 +5,15 @@ export interface Message {
   content: string;
 }
 
+export type ContextStrategy = 'sliding_window' | 'sticky_facts' | 'branching';
+
 export interface ChatRequest {
   messages: Message[];
   model: string;
   sessionId?: string | null;
+  contextStrategy?: ContextStrategy;
+  windowSize?: number;
+  branchId?: string | null;
   temperature?: number;
   top_p?: number;
   stop?: string[];
